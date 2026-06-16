@@ -17,6 +17,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any
+from urllib.parse import quote
 
 import discord
 from aiohttp import web
@@ -46,6 +47,7 @@ UPLOAD_CATEGORY_CHOICES = [
 
 PBKDF2_ITERATIONS = 220_000
 UPLOAD_READ_TIMEOUT_SECONDS = 30
+DEFAULT_DOWNLOAD_SESSION_TTL_MINUTES = 60
 
 logger = logging.getLogger("sets_downloader")
 
@@ -54,11 +56,15 @@ class UserFacingError(Exception):
     """An expected error that can be shown directly to a Discord user."""
 
 
-async def send_ephemeral(interaction: discord.Interaction, message: str, **kwargs: Any) -> None:
+async def send_ephemeral(
+    interaction: discord.Interaction,
+    message: str | None = None,
+    **kwargs: Any,
+) -> None:
     if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=True, **kwargs)
+        await interaction.followup.send(content=message, ephemeral=True, **kwargs)
     else:
-        await interaction.response.send_message(message, ephemeral=True, **kwargs)
+        await interaction.response.send_message(content=message, ephemeral=True, **kwargs)
 
 
 async def report_interaction_error(
@@ -102,6 +108,8 @@ class Config:
     sync_guild_id: int | None
     upload_role_id: int | None
     token_ttl_hours: int
+    download_session_ttl_minutes: int
+    frontend_dist_dir: Path
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -122,6 +130,15 @@ class Config:
             sync_guild_id=parse_optional_int(os.getenv("SYNC_GUILD_ID")),
             upload_role_id=parse_optional_int(os.getenv("UPLOAD_ROLE_ID")),
             token_ttl_hours=int(os.getenv("TOKEN_TTL_HOURS", "0")),
+            download_session_ttl_minutes=int(
+                os.getenv(
+                    "DOWNLOAD_SESSION_TTL_MINUTES",
+                    str(DEFAULT_DOWNLOAD_SESSION_TTL_MINUTES),
+                )
+            ),
+            frontend_dist_dir=Path(
+                os.getenv("FRONTEND_DIST_DIR", "private-set-vault-main/dist/client")
+            ),
         )
 
 
@@ -203,6 +220,22 @@ def category_zip_name(category: str) -> str:
     return f"{safe}.zip"
 
 
+def hash_session_token(session_token: str) -> str:
+    return hashlib.sha256(session_token.encode("utf-8")).hexdigest()
+
+
+def session_cookie_name(token_id: str) -> str:
+    return f"sets_session_{token_id}"
+
+
+def iso_from_ts(timestamp: int | float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+
+
+def safe_attachment_filename(filename: str) -> str:
+    return filename.replace("\\", "_").replace('"', "'")
+
+
 class Storage:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -243,6 +276,22 @@ class Storage:
                 "CREATE INDEX IF NOT EXISTS idx_download_tokens_category "
                 "ON download_tokens(category)"
             )
+            self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS download_sessions (
+                    id TEXT PRIMARY KEY,
+                    token_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    used_by_ip TEXT
+                )
+                """
+            )
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_download_sessions_token "
+                "ON download_sessions(token_id)"
+            )
             self.db.commit()
 
     def category_dir(self, category: str) -> Path:
@@ -257,6 +306,30 @@ class Storage:
             for path in directory.iterdir()
             if path.is_file() and path.suffix.lower() == ".txt"
         )
+
+    def list_category_file_entries(self, category: str) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for path in self.list_category_files(category):
+            stat = path.stat()
+            entries.append(
+                {
+                    "id": path.name,
+                    "name": path.name,
+                    "size": stat.st_size,
+                    "uploadedAt": iso_from_ts(stat.st_mtime),
+                }
+            )
+        return entries
+
+    def get_category_file(self, category: str, file_id: str) -> Path:
+        name = PurePath(file_id).name
+        if name != file_id or not name.lower().endswith(".txt"):
+            raise UserFacingError("This file does not exist.")
+
+        path = self.category_dir(category) / name
+        if not path.is_file():
+            raise UserFacingError("This file does not exist.")
+        return path
 
     def save_upload(self, category: str, filename: str, data: bytes) -> Path:
         if category not in DOWNLOAD_CATEGORIES:
@@ -343,6 +416,80 @@ class Storage:
             raise UserFacingError("Wrong password.")
         return str(row["category"])
 
+    def create_download_session(
+        self,
+        token_id: str,
+        password: str,
+        used_by_ip: str | None,
+    ) -> tuple[str, str, int]:
+        created_at = now_ts()
+        ttl_seconds = max(1, self.config.download_session_ttl_minutes) * 60
+        expires_at = created_at + ttl_seconds
+
+        with self.lock:
+            self._delete_expired_sessions_locked(created_at)
+            row = self.get_token(token_id)
+            if row is None:
+                raise UserFacingError("This download link does not exist.")
+            if row["used_at"] is not None:
+                raise UserFacingError("This download link was already used.")
+            if self._is_expired(row):
+                raise UserFacingError("This download link has expired.")
+            if not verify_password(password, row["password_hash"]):
+                raise UserFacingError("Wrong password.")
+
+            category = str(row["category"])
+            session_token = secrets.token_urlsafe(32)
+            session_hash = hash_session_token(session_token)
+            cursor = self.db.execute(
+                """
+                UPDATE download_tokens
+                SET used_at = ?, used_by_ip = ?
+                WHERE id = ? AND used_at IS NULL
+                """,
+                (created_at, used_by_ip, token_id),
+            )
+            if cursor.rowcount != 1:
+                raise UserFacingError("This download link was already used.")
+
+            self.db.execute(
+                """
+                INSERT INTO download_sessions
+                    (id, token_id, category, created_at, expires_at, used_by_ip)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (session_hash, token_id, category, created_at, expires_at, used_by_ip),
+            )
+            self.db.commit()
+            return session_token, category, expires_at
+
+    def validate_download_session(
+        self,
+        token_id: str,
+        session_token: str | None,
+    ) -> tuple[str, int]:
+        if not session_token:
+            raise UserFacingError("This download link was already used.")
+
+        session_hash = hash_session_token(session_token)
+        current_ts = now_ts()
+        with self.lock:
+            row = self.db.execute(
+                """
+                SELECT * FROM download_sessions
+                WHERE id = ? AND token_id = ?
+                """,
+                (session_hash, token_id),
+            ).fetchone()
+            if row is None:
+                raise UserFacingError("This download link was already used.")
+            if current_ts > int(row["expires_at"]):
+                self.db.execute("DELETE FROM download_sessions WHERE id = ?", (session_hash,))
+                self.db.commit()
+                raise UserFacingError("This download link has expired.")
+
+            return str(row["category"]), int(row["expires_at"])
+
     def burn_token(self, token_id: str, used_by_ip: str | None) -> None:
         with self.lock:
             row = self.get_token(token_id)
@@ -368,6 +515,12 @@ class Storage:
         if ttl_hours <= 0:
             return False
         return now_ts() > int(row["created_at"]) + ttl_hours * 3600
+
+    def _delete_expired_sessions_locked(self, current_ts: int) -> None:
+        self.db.execute(
+            "DELETE FROM download_sessions WHERE expires_at < ?",
+            (current_ts,),
+        )
 
     def build_zip(self, category: str) -> bytes:
         files = self.list_category_files(category)
@@ -455,9 +608,14 @@ class CategorySelect(discord.ui.Select):
         category = self.values[0]
         if category == PLUGIN_CATEGORY:
             view = discord.ui.View()
-            view.add_item(discord.ui.Button(label="Open plugins", url=client.config.plugin_url))
+            view.add_item(discord.ui.Button(label="open plugins", url=client.config.plugin_url))
+            embed = discord.Embed(
+                title="plugins",
+                description="open the plugins library below.",
+                color=discord.Color.from_rgb(18, 18, 18),
+            )
             await interaction.response.send_message(
-                f"For ALL apo plugins > {client.config.plugin_url}",
+                embed=embed,
                 view=view,
                 ephemeral=True,
             )
@@ -465,31 +623,36 @@ class CategorySelect(discord.ui.Select):
 
         files = client.storage.list_category_files(category)
         if not files:
-            await interaction.response.send_message(
-                f"No files are uploaded in `{DOWNLOAD_CATEGORIES[category]}` yet.",
-                ephemeral=True,
+            embed = discord.Embed(
+                title="no files yet",
+                description=f"`{DOWNLOAD_CATEGORIES[category]}` is empty right now.",
+                color=discord.Color.from_rgb(18, 18, 18),
             )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         token_id, password = client.storage.create_download_token(
             category,
             interaction.user.id,
         )
-        link = f"{client.config.base_url}/download/{token_id}"
+        link = f"{client.config.base_url}/d/{token_id}"
 
         view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Open download", url=link))
+        view.add_item(discord.ui.Button(label="open vault", url=link))
+
+        embed = discord.Embed(
+            title="private link created",
+            description="send this link and password to the user who should access the sets.",
+            color=discord.Color.from_rgb(18, 18, 18),
+        )
+        embed.add_field(name="category", value=f"`{DOWNLOAD_CATEGORIES[category]}`", inline=True)
+        embed.add_field(name="files", value=f"`{len(files)}`", inline=True)
+        embed.add_field(name="password", value=f"`{password}`", inline=False)
+        embed.add_field(name="link", value=link, inline=False)
+        embed.set_footer(text="the link burns after the first correct password.")
 
         await interaction.response.send_message(
-            "\n".join(
-                [
-                    f"Category: `{DOWNLOAD_CATEGORIES[category]}`",
-                    f"Link: {link}",
-                    f"Password: `{password}`",
-                    "",
-                    "The link burns after the first correct password download.",
-                ]
-            ),
+            embed=embed,
             view=view,
             ephemeral=True,
         )
@@ -531,18 +694,23 @@ async def send_embed(interaction: discord.Interaction) -> None:
         return
 
     embed = discord.Embed(
-        title="Sets downloader",
-        description="Select a category below.",
-        color=discord.Color.blurple(),
+        title="private set vault",
+        description="select a category to create a private one-time download link.",
+        color=discord.Color.from_rgb(18, 18, 18),
     )
     embed.add_field(
-        name="Categories",
+        name="categories",
         value="\n".join(f"- {label}" for label in ALL_CATEGORIES.values()),
+        inline=False,
+    )
+    embed.add_field(
+        name="access",
+        value="links require a generated password and burn after a correct unlock.",
         inline=False,
     )
 
     await interaction.channel.send(embed=embed, view=CategorySelectView())
-    await interaction.response.send_message("Downloader embed sent.", ephemeral=True)
+    await interaction.response.send_message("embed sent.", ephemeral=True)
 
 
 @upload_group.command(name="file", description="Upload one .txt file into a category.")
@@ -576,15 +744,19 @@ async def upload_file(
         saved_path = client.storage.save_upload(category.value, file.filename, data)
         count = len(client.storage.list_category_files(category.value))
 
-        await send_ephemeral(
-            interaction,
-            "\n".join(
-                [
-                    f"Uploaded `{saved_path.name}` to `{category.name}`.",
-                    f"Files in category: `{count}/{client.config.max_files_per_category}`.",
-                ]
-            )
+        embed = discord.Embed(
+            title="file uploaded",
+            color=discord.Color.from_rgb(18, 18, 18),
         )
+        embed.add_field(name="file", value=f"`{saved_path.name}`", inline=False)
+        embed.add_field(name="category", value=f"`{category.name}`", inline=True)
+        embed.add_field(
+            name="count",
+            value=f"`{count}/{client.config.max_files_per_category}`",
+            inline=True,
+        )
+
+        await send_ephemeral(interaction, embed=embed)
     except UserFacingError as exc:
         await send_ephemeral(interaction, str(exc))
 
@@ -593,11 +765,176 @@ async def health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+def api_error(exc: UserFacingError) -> web.Response:
+    message = str(exc)
+    lower = message.lower()
+    if "wrong password" in lower:
+        status = 401
+    elif "does not exist" in lower or "not found" in lower:
+        status = 404
+    elif "already used" in lower or "session" in lower:
+        status = 409
+    elif "expired" in lower:
+        status = 410
+    else:
+        status = 400
+
+    return web.json_response({"ok": False, "error": message}, status=status)
+
+
+def category_payload(storage: Storage, category: str, expires_at: int) -> dict[str, Any]:
+    files = storage.list_category_file_entries(category)
+    total_size = sum(int(file["size"]) for file in files)
+    return {
+        "category": {
+            "name": DOWNLOAD_CATEGORIES[category],
+            "fileCount": len(files),
+            "totalSize": total_size,
+            "expiresAt": iso_from_ts(expires_at),
+        },
+        "files": files,
+    }
+
+
+def session_token_from_request(request: web.Request, token_id: str) -> str | None:
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token:
+            return token
+
+    return request.cookies.get(session_cookie_name(token_id))
+
+
+def set_session_cookie(
+    response: web.StreamResponse,
+    config: Config,
+    token_id: str,
+    session_token: str,
+    expires_at: int,
+) -> None:
+    max_age = max(1, expires_at - now_ts())
+    response.set_cookie(
+        session_cookie_name(token_id),
+        session_token,
+        max_age=max_age,
+        path=f"/api/download/{token_id}",
+        httponly=True,
+        secure=config.base_url.startswith("https://"),
+        samesite="Lax",
+    )
+
+
+def authorized_download(request: web.Request) -> tuple[str, int, str]:
+    storage: Storage = request.app["storage"]
+    token_id = request.match_info["token_id"]
+    session_token = session_token_from_request(request, token_id)
+    category, expires_at = storage.validate_download_session(token_id, session_token)
+    return category, expires_at, token_id
+
+
+async def api_verify_download(request: web.Request) -> web.Response:
+    config: Config = request.app["config"]
+    storage: Storage = request.app["storage"]
+    token_id = request.match_info["token_id"]
+
+    try:
+        try:
+            data = await request.json()
+        except ValueError:
+            data = {}
+
+        password = str(data.get("password", ""))
+        if not password:
+            raise UserFacingError("Password is required.")
+
+        session_token, category, expires_at = storage.create_download_session(
+            token_id,
+            password,
+            request_ip(request),
+        )
+    except UserFacingError as exc:
+        return api_error(exc)
+
+    response = web.json_response(
+        {
+            "ok": True,
+            "sessionToken": session_token,
+            **category_payload(storage, category, expires_at),
+        }
+    )
+    set_session_cookie(response, config, token_id, session_token, expires_at)
+    return response
+
+
+async def api_list_files(request: web.Request) -> web.Response:
+    storage: Storage = request.app["storage"]
+    try:
+        category, expires_at, _ = authorized_download(request)
+    except UserFacingError as exc:
+        return api_error(exc)
+
+    return web.json_response(category_payload(storage, category, expires_at))
+
+
+async def api_file_raw(request: web.Request) -> web.Response:
+    storage: Storage = request.app["storage"]
+    try:
+        category, _, _ = authorized_download(request)
+        path = storage.get_category_file(category, request.match_info["file_id"])
+    except UserFacingError as exc:
+        return api_error(exc)
+
+    return web.Response(
+        body=path.read_bytes(),
+        headers={
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+async def api_file_download(request: web.Request) -> web.Response:
+    storage: Storage = request.app["storage"]
+    try:
+        category, _, _ = authorized_download(request)
+        path = storage.get_category_file(category, request.match_info["file_id"])
+    except UserFacingError as exc:
+        return api_error(exc)
+
+    return web.Response(
+        body=path.read_bytes(),
+        headers={
+            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Disposition": f'attachment; filename="{safe_attachment_filename(path.name)}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+async def api_zip_download(request: web.Request) -> web.Response:
+    storage: Storage = request.app["storage"]
+    try:
+        category, _, _ = authorized_download(request)
+        zip_bytes = storage.build_zip(category)
+    except UserFacingError as exc:
+        return api_error(exc)
+
+    return web.Response(
+        body=zip_bytes,
+        headers={
+            "Content-Type": "application/zip",
+            "Content-Disposition": f'attachment; filename="{category_zip_name(category)}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 async def home(request: web.Request) -> web.Response:
     config: Config = request.app["config"]
     return html_response(
         page(
-            "Sets downloader",
+            "sets downloader",
             f"""
             <p>The downloader is online.</p>
             <p>Use the Discord select menu to generate a one-time link.</p>
@@ -612,46 +949,42 @@ async def plugins_redirect(request: web.Request) -> web.Response:
     raise web.HTTPFound(config.plugin_url)
 
 
-async def download_form(request: web.Request) -> web.Response:
-    storage: Storage = request.app["storage"]
+async def legacy_download_redirect(request: web.Request) -> web.Response:
     token_id = request.match_info["token_id"]
-
-    error = unavailable_reason(storage, token_id)
-    if error:
-        return html_response(page("Download unavailable", f"<p>{html.escape(error)}</p>"), 404)
-
-    body = f"""
-    <form method="post" action="/download/{html.escape(token_id)}">
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="off" autofocus required>
-        <button type="submit">Download</button>
-    </form>
-    <p class="muted">This link can only be used once.</p>
-    """
-    return html_response(page("Enter password", body))
+    raise web.HTTPFound(f"/d/{quote(token_id)}")
 
 
-async def download_post(request: web.Request) -> web.Response:
-    storage: Storage = request.app["storage"]
-    token_id = request.match_info["token_id"]
-    form = await request.post()
-    password = str(form.get("password", ""))
+async def download_app(request: web.Request) -> web.StreamResponse:
+    frontend_index: Path | None = request.app.get("frontend_index")
+    if frontend_index and frontend_index.is_file():
+        return web.FileResponse(frontend_index)
 
-    try:
-        category = storage.validate_token_password(token_id, password)
-        zip_bytes = storage.build_zip(category)
-        storage.burn_token(token_id, request_ip(request))
-    except UserFacingError as exc:
-        return html_response(page("Download unavailable", f"<p>{html.escape(str(exc))}</p>"), 400)
-
-    return web.Response(
-        body=zip_bytes,
-        headers={
-            "Content-Type": "application/zip",
-            "Content-Disposition": f'attachment; filename="{category_zip_name(category)}"',
-            "Cache-Control": "no-store",
-        },
+    return html_response(
+        page(
+            "private set vault",
+            """
+            <p>The frontend build was not found on this server.</p>
+            <p>Build the app in <code>private-set-vault-main</code>, then restart the bot.</p>
+            """,
+        ),
+        503,
     )
+
+
+async def frontend_asset_or_app(request: web.Request) -> web.StreamResponse:
+    frontend_root: Path | None = request.app.get("frontend_root")
+    frontend_index: Path | None = request.app.get("frontend_index")
+    if not frontend_root or not frontend_index:
+        return html_response(page("not found", "<p>not found.</p>"), 404)
+
+    rel_path = request.match_info.get("path", "")
+    if rel_path:
+        candidate = (frontend_root / rel_path).resolve()
+        if (candidate == frontend_root or frontend_root in candidate.parents) and candidate.is_file():
+            cache_control = "public, max-age=31536000" if "." in candidate.name else "no-store"
+            return web.FileResponse(candidate, headers={"Cache-Control": cache_control})
+
+    return web.FileResponse(frontend_index, headers={"Cache-Control": "no-store"})
 
 
 def unavailable_reason(storage: Storage, token_id: str) -> str | None:
@@ -758,15 +1091,53 @@ def page(title: str, body: str) -> str:
 </html>"""
 
 
+def find_frontend_root(config: Config) -> Path | None:
+    candidates = [
+        config.frontend_dist_dir,
+        Path("private-set-vault-main/dist/client"),
+        Path("private-set-vault-main/dist"),
+        Path("private-set-vault-main/.output/public"),
+    ]
+    for candidate in candidates:
+        index = candidate / "index.html"
+        if index.is_file():
+            return candidate.resolve()
+    return None
+
+
 async def create_web_app(config: Config, storage: Storage) -> web.Application:
     app = web.Application()
     app["config"] = config
     app["storage"] = storage
+    frontend_root = find_frontend_root(config)
+    if frontend_root:
+        app["frontend_root"] = frontend_root
+        app["frontend_index"] = frontend_root / "index.html"
+        logger.info("Serving frontend from %s.", frontend_root)
+    else:
+        logger.warning(
+            "Frontend build not found. Expected index.html under %s.",
+            config.frontend_dist_dir,
+        )
+
     app.router.add_get("/", home)
     app.router.add_get("/health", health)
     app.router.add_get("/plugins", plugins_redirect)
-    app.router.add_get(r"/download/{token_id:[A-Za-z0-9_-]+}", download_form)
-    app.router.add_post(r"/download/{token_id:[A-Za-z0-9_-]+}", download_post)
+    app.router.add_get(r"/d/{token_id:[A-Za-z0-9_-]+}", download_app)
+    app.router.add_get(r"/download/{token_id:[A-Za-z0-9_-]+}", legacy_download_redirect)
+    app.router.add_post(r"/download/{token_id:[A-Za-z0-9_-]+}", legacy_download_redirect)
+    app.router.add_post(r"/api/download/{token_id:[A-Za-z0-9_-]+}/verify", api_verify_download)
+    app.router.add_get(r"/api/download/{token_id:[A-Za-z0-9_-]+}/files", api_list_files)
+    app.router.add_get(
+        r"/api/download/{token_id:[A-Za-z0-9_-]+}/files/{file_id}/raw",
+        api_file_raw,
+    )
+    app.router.add_get(
+        r"/api/download/{token_id:[A-Za-z0-9_-]+}/files/{file_id}/download",
+        api_file_download,
+    )
+    app.router.add_get(r"/api/download/{token_id:[A-Za-z0-9_-]+}/zip", api_zip_download)
+    app.router.add_get(r"/{path:.*}", frontend_asset_or_app)
     return app
 
 
