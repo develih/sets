@@ -14,14 +14,12 @@ import {
   Lock,
 } from "lucide-react";
 
-import logoAsset from "@/assets/sets-logo.jpg.asset.json";
 import {
   verifyPassword,
   fetchLink,
   fetchFileText,
   downloadFileUrl,
   downloadZipUrl,
-  DEMO_HINT,
   type LinkState,
   type FileEntry,
 } from "@/lib/sets-api";
@@ -30,11 +28,11 @@ import { formatBytes, formatCountdown, formatDate } from "@/lib/format";
 export const Route = createFileRoute("/d/$tokenId")({
   head: () => ({
     meta: [
-      { title: "Sets Downloader — Private Link" },
+      { title: "private set vault" },
       { name: "robots", content: "noindex,nofollow" },
       {
         name: "description",
-        content: "Securely download a private set of .txt files shared with you.",
+        content: "unlock and download private .txt sets.",
       },
     ],
   }),
@@ -46,8 +44,14 @@ type Phase = "locked" | "loading" | "ready";
 function Page() {
   const { tokenId } = Route.useParams();
   const [phase, setPhase] = useState<Phase>("locked");
-  const [session, setSession] = useState<string>("");
+  const [session, setSession] = useState<string>(() =>
+    typeof window === "undefined" ? "" : sessionStorage.getItem(`sets_session_${tokenId}`) || "",
+  );
   const [linkState, setLinkState] = useState<LinkState | null>(null);
+
+  useEffect(() => {
+    if (session) setPhase("loading");
+  }, [session]);
 
   useEffect(() => {
     if (phase !== "loading") return;
@@ -71,12 +75,13 @@ function Page() {
           <PasswordScreen
             tokenId={tokenId}
             onUnlock={(token) => {
+              sessionStorage.setItem(`sets_session_${tokenId}`, token);
               setSession(token);
               setPhase("loading");
             }}
           />
         )}
-        {phase === "loading" && <CenterSpinner label="Opening secure link…" />}
+        {phase === "loading" && <CenterSpinner label="opening secure link" />}
         {phase === "ready" && linkState && (
           <LinkStateView
             state={linkState}
@@ -85,6 +90,7 @@ function Page() {
             onRelock={() => {
               setPhase("locked");
               setSession("");
+              sessionStorage.removeItem(`sets_session_${tokenId}`);
               setLinkState(null);
             }}
           />
@@ -179,12 +185,12 @@ function PasswordScreen({
     if (r.ok) return onUnlock(r.token);
     switch (r.reason) {
       case "wrong_password":
-        setError("Incorrect password");
+        setError("wrong password");
         setShake(true);
         setTimeout(() => setShake(false), 500);
         break;
       case "rate_limited":
-        setError("Too many attempts. Wait a moment.");
+        setError("too many attempts. wait a moment.");
         break;
       case "expired":
         setLinkDead("expired");
@@ -196,7 +202,7 @@ function PasswordScreen({
         setLinkDead("not_found");
         break;
       default:
-        setError("Something went wrong");
+        setError("something went wrong");
     }
   }
 
@@ -214,21 +220,16 @@ function PasswordScreen({
               "radial-gradient(circle, rgba(255,255,255,0.18), transparent 70%)",
           }}
         />
-        <div className="overflow-hidden rounded-full ring-1 ring-white/10 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.9)]">
-          <img
-            src={logoAsset.url}
-            alt="Sets"
-            className="h-36 w-36 object-cover sm:h-44 sm:w-44"
-            draggable={false}
-          />
+        <div className="grid h-36 w-36 place-items-center rounded-full border border-white/10 bg-white/[0.04] text-[11px] font-medium lowercase tracking-[0.35em] text-white/60 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.9)] sm:h-44 sm:w-44">
+          sets
         </div>
       </div>
 
       <h1 className="mb-1 text-center text-xs font-medium uppercase tracking-[0.35em] text-white/50">
-        Sets
+        private set vault
       </h1>
       <p className="mb-10 text-center text-[11px] tracking-wider text-white/30">
-        Private link
+        one-time private link
       </p>
 
       <form
@@ -258,15 +259,9 @@ function PasswordScreen({
           </div>
         )}
         <p className="mt-6 text-center text-[10px] uppercase tracking-[0.3em] text-white/25">
-          press enter to unlock
+          press enter or unlock
         </p>
       </form>
-
-      {tokenId === "demo" || tokenId === "preview" ? (
-        <p className="mt-10 text-center text-[10px] tracking-widest text-white/20">
-          {DEMO_HINT}
-        </p>
-      ) : null}
 
       <style>{`
         @keyframes shake {
@@ -285,18 +280,18 @@ function DeadLink({ reason }: { reason: "expired" | "used" | "not_found" }) {
   const map = {
     expired: {
       icon: <Clock className="h-5 w-5" />,
-      title: "Link expired",
-      body: "This download link is no longer valid. Ask the sender for a fresh one.",
+      title: "link expired",
+      body: "this download link is no longer valid. ask the sender for a fresh one.",
     },
     used: {
       icon: <CheckCircle2 className="h-5 w-5" />,
-      title: "Link already used",
-      body: "One-time link. It has already been opened and can't be reused.",
+      title: "link already used",
+      body: "one-time link. it has already been opened and cannot be reused.",
     },
     not_found: {
       icon: <AlertTriangle className="h-5 w-5" />,
-      title: "Link not found",
-      body: "We couldn't find this link. Check the URL or contact the sender.",
+      title: "link not found",
+      body: "we could not find this link. check the url or contact the sender.",
     },
   }[reason];
 
@@ -336,9 +331,9 @@ function LinkStateView({
         <CategoryHeader category={state.category} fileCount={0} totalSize={0} disabled />
         <div className="mt-8 grid place-items-center rounded-2xl border border-white/10 bg-white/[0.02] px-6 py-20 text-center">
           <Inbox className="h-7 w-7 text-white/40" />
-          <h3 className="mt-3 text-sm font-medium">No files in this category</h3>
+          <h3 className="mt-3 text-sm font-medium">no files in this category</h3>
           <p className="mt-1 max-w-sm text-xs text-white/40">
-            The sender hasn't uploaded anything to this category yet.
+            the sender has not uploaded anything to this category yet.
           </p>
         </div>
       </Shell>
@@ -362,13 +357,11 @@ function Shell({ children, onRelock }: { children: React.ReactNode; onRelock: ()
     <div className="mx-auto w-full max-w-5xl px-4 pb-24 pt-6 sm:pt-10">
       <header className="mb-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <img
-            src={logoAsset.url}
-            alt=""
-            className="h-9 w-9 rounded-full object-cover ring-1 ring-white/10"
-          />
+          <div className="grid h-9 w-9 place-items-center rounded-full border border-white/10 bg-white/[0.04] text-[9px] lowercase tracking-[0.2em] text-white/50">
+            sets
+          </div>
           <div className="leading-tight">
-            <div className="text-sm font-medium tracking-tight">Sets</div>
+            <div className="text-sm font-medium tracking-tight">private set vault</div>
             <div className="text-[10px] uppercase tracking-[0.25em] text-white/40">
               private link
             </div>
@@ -378,7 +371,7 @@ function Shell({ children, onRelock }: { children: React.ReactNode; onRelock: ()
           onClick={onRelock}
           className="inline-flex items-center gap-1.5 rounded-full border border-white/10 px-3 py-1.5 text-[11px] text-white/60 transition hover:bg-white/5 hover:text-white"
         >
-          <Lock className="h-3 w-3" /> Lock
+          <Lock className="h-3 w-3" /> lock
         </button>
       </header>
       {children}
@@ -412,7 +405,7 @@ function CategoryHeader({
       <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.3em] text-white/40">
-            <span>Category</span>
+            <span>category</span>
             {countdown && (
               <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-black/40 px-2 py-0.5 tracking-normal normal-case">
                 <Clock className="h-2.5 w-2.5" /> expires in {countdown}
@@ -423,7 +416,7 @@ function CategoryHeader({
             {category.name}
           </h1>
           <p className="mt-1 text-xs text-white/45">
-            {fileCount} file{fileCount === 1 ? "" : "s"} · {formatBytes(totalSize)}
+            {fileCount} file{fileCount === 1 ? "" : "s"} / {formatBytes(totalSize)}
           </p>
         </div>
         <button
@@ -432,7 +425,7 @@ function CategoryHeader({
           className="group relative inline-flex h-11 w-full items-center justify-center gap-2 overflow-hidden rounded-xl bg-white px-5 text-sm font-medium text-black transition hover:bg-white/90 disabled:opacity-40 sm:w-auto"
         >
           <Download className="h-4 w-4" />
-          Download all as ZIP
+          download all zip
         </button>
       </div>
     </section>
@@ -540,7 +533,7 @@ function FileCard({
           <div className="truncate text-sm font-medium text-white">{file.name}</div>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-white/40">
             <span>{formatBytes(file.size)}</span>
-            <span className="text-white/20">·</span>
+            <span className="text-white/20">/</span>
             <span>{formatDate(file.uploadedAt)}</span>
           </div>
         </div>
@@ -551,7 +544,7 @@ function FileCard({
           onClick={onPreview}
           className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-transparent text-xs text-white/70 transition hover:bg-white/5 hover:text-white"
         >
-          <Eye className="h-3.5 w-3.5" /> Preview
+          <Eye className="h-3.5 w-3.5" /> preview
         </button>
         <button
           onClick={copyText}
@@ -561,14 +554,14 @@ function FileCard({
           }
         >
           {copied ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-          {copied ? "Copied" : "Copy"}
+          {copied ? "copied" : "copy"}
         </button>
         <a
           href={downloadFileUrl(tokenId, file.id)}
           download={file.name}
           className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg bg-white text-xs font-medium text-black transition hover:bg-white/90"
         >
-          <Download className="h-3.5 w-3.5" /> Get
+          <Download className="h-3.5 w-3.5" /> get
         </a>
       </div>
     </article>
@@ -597,7 +590,7 @@ function PreviewDrawer({
     setErr(null);
     fetchFileText(tokenId, file.id, sessionToken)
       .then((t) => alive && setText(t))
-      .catch(() => alive && setErr("Could not load preview."));
+      .catch(() => alive && setErr("could not load preview."));
     return () => {
       alive = false;
     };
@@ -622,13 +615,13 @@ function PreviewDrawer({
             <div className="min-w-0">
               <div className="truncate text-sm font-medium">{file.name}</div>
               <div className="text-[11px] text-white/40">
-                {formatBytes(file.size)} · {formatDate(file.uploadedAt)}
+                {formatBytes(file.size)} / {formatDate(file.uploadedAt)}
               </div>
             </div>
           </div>
           <button
             onClick={onClose}
-            aria-label="Close"
+            aria-label="close"
             className="grid h-8 w-8 place-items-center rounded-md text-white/60 transition hover:bg-white/5 hover:text-white"
           >
             <X className="h-4 w-4" />
@@ -653,7 +646,7 @@ function PreviewDrawer({
             download={file.name}
             className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-medium text-black transition hover:bg-white/90"
           >
-            <Download className="h-3.5 w-3.5" /> Download
+            <Download className="h-3.5 w-3.5" /> download
           </a>
         </div>
       </div>

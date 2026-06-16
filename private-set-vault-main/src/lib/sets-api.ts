@@ -177,5 +177,3 @@ function demoState(): LinkState {
     files: DEMO_FILES,
   };
 }
-
-export const DEMO_HINT = `demo link -> password: ${DEMO_PASSWORD}`;

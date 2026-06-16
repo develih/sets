@@ -6,9 +6,9 @@ Bot de Discord con `/send embed` y `/upload file`.
 
 - `/send embed` sends an embed with a category select menu.
 - Categories: `loud sets`, `blazing sets`, `talking sets`, `pannings`, `plugins`.
-- Selecting a set category creates a one-time download link plus password.
-- The password burns the link after the first successful download.
-- The download is a ZIP with every `.txt` uploaded to that category.
+- Selecting a set category creates a one-time private vault link plus password.
+- The password burns the link after the first correct unlock.
+- The vault lists every `.txt` in the category with preview, copy, single-file download, and ZIP download actions.
 - `plugins` redirects to `https://gofile.io/d/hDh8Vu`.
 - `/upload file` uploads one `.txt` at a time into a category.
 - Each set category can hold max `10` `.txt` files by default.
@@ -28,6 +28,17 @@ Edit `.env` and set:
 DISCORD_TOKEN=your_bot_token
 BASE_URL=https://edating.gay
 ```
+
+Optional frontend build:
+
+```powershell
+cd private-set-vault-main
+npm install
+npm run build
+cd ..
+```
+
+If the frontend build is missing, the bot serves a built-in vault page automatically.
 
 For faster slash command updates while testing, set `SYNC_GUILD_ID` to your Discord server ID.
 

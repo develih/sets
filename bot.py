@@ -954,21 +954,533 @@ async def legacy_download_redirect(request: web.Request) -> web.Response:
     raise web.HTTPFound(f"/d/{quote(token_id)}")
 
 
+def builtin_download_app(token_id: str) -> web.Response:
+    escaped_token = html.escape(token_id, quote=True)
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <title>private set vault</title>
+    <style>
+        :root {{
+            color-scheme: dark;
+            --bg: #000;
+            --panel: rgba(255, 255, 255, 0.035);
+            --panel-strong: rgba(255, 255, 255, 0.065);
+            --line: rgba(255, 255, 255, 0.11);
+            --text: rgba(255, 255, 255, 0.92);
+            --muted: rgba(255, 255, 255, 0.48);
+            --faint: rgba(255, 255, 255, 0.24);
+            --danger: #ff6b6b;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            margin: 0;
+            min-height: 100vh;
+            background:
+                radial-gradient(circle at 50% 38%, rgba(255,255,255,0.105), transparent 28rem),
+                radial-gradient(circle at 50% 100%, rgba(255,255,255,0.04), transparent 36rem),
+                #000;
+            color: var(--text);
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }}
+        body::before {{
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            opacity: 0.06;
+            background-image:
+                linear-gradient(to right, #fff 1px, transparent 1px),
+                linear-gradient(to bottom, #fff 1px, transparent 1px);
+            background-size: 64px 64px;
+            mask-image: radial-gradient(ellipse at center, black 35%, transparent 78%);
+        }}
+        button, input {{ font: inherit; }}
+        button, a.button {{
+            height: 40px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.05);
+            color: var(--text);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 0 14px;
+            text-decoration: none;
+            cursor: pointer;
+            transition: border-color .16s ease, background .16s ease, color .16s ease;
+        }}
+        button:hover, a.button:hover {{ background: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.22); }}
+        button.primary, a.primary {{ background: #fff; color: #000; border-color: #fff; font-weight: 650; }}
+        button.primary:hover, a.primary:hover {{ background: rgba(255,255,255,0.88); }}
+        .screen {{ position: relative; z-index: 1; min-height: 100vh; }}
+        .login {{
+            display: grid;
+            place-items: center;
+            padding: 32px 18px;
+        }}
+        .login-inner {{
+            width: min(360px, 100%);
+            text-align: center;
+        }}
+        .mark {{
+            width: 104px;
+            height: 104px;
+            margin: 0 auto 28px;
+            border-radius: 999px;
+            display: grid;
+            place-items: center;
+            border: 1px solid var(--line);
+            background: radial-gradient(circle at 35% 25%, rgba(255,255,255,0.18), rgba(255,255,255,0.03));
+            box-shadow: 0 30px 80px -30px #000;
+            letter-spacing: .18em;
+            text-transform: lowercase;
+            color: rgba(255,255,255,0.72);
+            font-size: 12px;
+        }}
+        h1 {{
+            margin: 0;
+            font-size: 13px;
+            line-height: 1.2;
+            letter-spacing: .34em;
+            text-transform: lowercase;
+            font-weight: 650;
+            color: rgba(255,255,255,0.68);
+        }}
+        .subtitle {{
+            margin: 9px 0 32px;
+            color: var(--faint);
+            font-size: 11px;
+            letter-spacing: .18em;
+            text-transform: lowercase;
+        }}
+        .password {{
+            width: 100%;
+            height: 48px;
+            border: 0;
+            border-bottom: 1px solid var(--line);
+            border-radius: 0;
+            background: transparent;
+            color: var(--text);
+            outline: none;
+            text-align: center;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 18px;
+            letter-spacing: .32em;
+        }}
+        .password::placeholder {{
+            color: var(--faint);
+            font-family: inherit;
+            font-size: 13px;
+            letter-spacing: .16em;
+        }}
+        .hint {{
+            margin-top: 22px;
+            color: var(--faint);
+            font-size: 10px;
+            letter-spacing: .28em;
+            text-transform: lowercase;
+        }}
+        .error {{
+            min-height: 18px;
+            margin-top: 14px;
+            color: var(--danger);
+            font-size: 12px;
+        }}
+        .dashboard {{
+            width: min(1040px, 100%);
+            margin: 0 auto;
+            padding: 30px 18px 80px;
+        }}
+        header {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 22px;
+        }}
+        .brand {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }}
+        .brand-mark {{
+            width: 38px;
+            height: 38px;
+            border-radius: 999px;
+            border: 1px solid var(--line);
+            background: var(--panel-strong);
+            display: grid;
+            place-items: center;
+            color: var(--muted);
+            font-size: 10px;
+        }}
+        .brand-title {{ font-size: 14px; font-weight: 650; text-transform: lowercase; }}
+        .brand-subtitle {{ color: var(--muted); font-size: 10px; letter-spacing: .2em; text-transform: lowercase; }}
+        .summary {{
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.016));
+            padding: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            box-shadow: 0 20px 60px -42px #000;
+        }}
+        .eyebrow {{
+            color: var(--muted);
+            font-size: 10px;
+            letter-spacing: .28em;
+            text-transform: lowercase;
+        }}
+        .category {{
+            margin-top: 8px;
+            font-size: clamp(22px, 4vw, 34px);
+            font-weight: 720;
+            letter-spacing: 0;
+            text-transform: lowercase;
+        }}
+        .meta {{
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 13px;
+        }}
+        .files {{
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin-top: 18px;
+        }}
+        .file {{
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--panel);
+            padding: 16px;
+            min-width: 0;
+        }}
+        .file-name {{
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 14px;
+            font-weight: 650;
+        }}
+        .file-meta {{
+            margin-top: 5px;
+            color: var(--muted);
+            font-size: 12px;
+        }}
+        .actions {{
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 7px;
+            margin-top: 14px;
+        }}
+        .actions button, .actions a.button {{
+            height: 36px;
+            padding: 0 8px;
+            font-size: 12px;
+        }}
+        .empty {{
+            margin-top: 18px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--panel);
+            padding: 52px 18px;
+            text-align: center;
+            color: var(--muted);
+        }}
+        .modal {{
+            position: fixed;
+            inset: 0;
+            z-index: 20;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 18px;
+            background: rgba(0,0,0,.82);
+            backdrop-filter: blur(8px);
+        }}
+        .modal.open {{ display: flex; }}
+        .modal-panel {{
+            width: min(760px, 100%);
+            height: min(680px, 84vh);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: #070707;
+            display: flex;
+            flex-direction: column;
+        }}
+        .modal-head {{
+            border-bottom: 1px solid var(--line);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 14px;
+        }}
+        .modal-title {{
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 13px;
+            font-weight: 650;
+        }}
+        pre {{
+            margin: 0;
+            padding: 14px;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            flex: 1;
+            font-size: 12px;
+            line-height: 1.55;
+            color: rgba(255,255,255,.86);
+        }}
+        .hidden {{ display: none !important; }}
+        @media (max-width: 760px) {{
+            .summary {{ align-items: stretch; flex-direction: column; }}
+            .summary .primary {{ width: 100%; }}
+            .files {{ grid-template-columns: 1fr; }}
+            header {{ align-items: flex-start; }}
+        }}
+    </style>
+</head>
+<body>
+    <main class="screen">
+        <section id="login" class="login">
+            <div class="login-inner">
+                <div class="mark">sets</div>
+                <h1>private set vault</h1>
+                <p class="subtitle">one-time private link</p>
+                <form id="login-form">
+                    <input id="password" class="password" type="password" autocomplete="current-password" placeholder="enter password" autofocus>
+                    <div id="error" class="error"></div>
+                    <button id="unlock" class="primary" type="submit" style="width:100%; margin-top: 6px;">unlock vault</button>
+                    <div class="hint">password required</div>
+                </form>
+            </div>
+        </section>
+
+        <section id="dashboard" class="dashboard hidden">
+            <header>
+                <div class="brand">
+                    <div class="brand-mark">sets</div>
+                    <div>
+                        <div class="brand-title">private set vault</div>
+                        <div class="brand-subtitle">private link</div>
+                    </div>
+                </div>
+                <button id="lock">lock</button>
+            </header>
+            <section class="summary">
+                <div>
+                    <div class="eyebrow">category</div>
+                    <div id="category" class="category">sets</div>
+                    <div id="meta" class="meta"></div>
+                </div>
+                <a id="download-all" class="button primary" href="#">download all zip</a>
+            </section>
+            <div id="empty" class="empty hidden">no files are available in this category.</div>
+            <section id="files" class="files"></section>
+        </section>
+    </main>
+
+    <section id="modal" class="modal" aria-hidden="true">
+        <div class="modal-panel">
+            <div class="modal-head">
+                <div id="modal-title" class="modal-title"></div>
+                <button id="modal-close">close</button>
+            </div>
+            <pre id="preview"></pre>
+        </div>
+    </section>
+
+    <script>
+        const tokenId = "{escaped_token}";
+        let sessionToken = sessionStorage.getItem("sets_session_" + tokenId) || "";
+
+        const login = document.getElementById("login");
+        const dashboard = document.getElementById("dashboard");
+        const form = document.getElementById("login-form");
+        const password = document.getElementById("password");
+        const error = document.getElementById("error");
+        const unlock = document.getElementById("unlock");
+        const filesEl = document.getElementById("files");
+        const emptyEl = document.getElementById("empty");
+        const categoryEl = document.getElementById("category");
+        const metaEl = document.getElementById("meta");
+        const downloadAll = document.getElementById("download-all");
+        const modal = document.getElementById("modal");
+        const modalTitle = document.getElementById("modal-title");
+        const preview = document.getElementById("preview");
+
+        function bytes(n) {{
+            if (!Number.isFinite(n)) return "-";
+            if (n < 1024) return n + " b";
+            const units = ["kb", "mb", "gb"];
+            let v = n / 1024;
+            let i = 0;
+            while (v >= 1024 && i < units.length - 1) {{
+                v /= 1024;
+                i++;
+            }}
+            return (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + " " + units[i];
+        }}
+
+        function dateLabel(iso) {{
+            if (!iso) return "-";
+            const d = new Date(iso);
+            if (Number.isNaN(d.getTime())) return "-";
+            return d.toLocaleString(undefined, {{ month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }});
+        }}
+
+        function apiHeaders() {{
+            return sessionToken ? {{ Authorization: "Bearer " + sessionToken }} : {{}};
+        }}
+
+        function showLogin(message) {{
+            dashboard.classList.add("hidden");
+            login.classList.remove("hidden");
+            error.textContent = message || "";
+            password.focus();
+        }}
+
+        function showDashboard() {{
+            login.classList.add("hidden");
+            dashboard.classList.remove("hidden");
+        }}
+
+        function statusMessage(status) {{
+            if (status === 401) return "wrong password.";
+            if (status === 404) return "link not found.";
+            if (status === 409) return "this link was already used.";
+            if (status === 410) return "this link has expired.";
+            return "something went wrong.";
+        }}
+
+        async function verify(pass) {{
+            const res = await fetch("/api/download/" + encodeURIComponent(tokenId) + "/verify", {{
+                method: "POST",
+                headers: {{ "Content-Type": "application/json" }},
+                body: JSON.stringify({{ password: pass }}),
+            }});
+            if (!res.ok) throw new Error(statusMessage(res.status));
+            const data = await res.json();
+            sessionToken = data.sessionToken || "";
+            sessionStorage.setItem("sets_session_" + tokenId, sessionToken);
+            render(data);
+        }}
+
+        async function loadFiles() {{
+            const res = await fetch("/api/download/" + encodeURIComponent(tokenId) + "/files", {{
+                headers: apiHeaders(),
+            }});
+            if (!res.ok) throw new Error(statusMessage(res.status));
+            render(await res.json());
+        }}
+
+        function render(data) {{
+            const files = data.files || [];
+            const category = data.category || {{ name: "sets", totalSize: 0 }};
+            categoryEl.textContent = category.name || "sets";
+            const total = category.totalSize || files.reduce((sum, file) => sum + (file.size || 0), 0);
+            metaEl.textContent = files.length + " file" + (files.length === 1 ? "" : "s") + " / " + bytes(total);
+            downloadAll.href = "/api/download/" + encodeURIComponent(tokenId) + "/zip";
+            filesEl.textContent = "";
+            emptyEl.classList.toggle("hidden", files.length !== 0);
+            for (const file of files) {{
+                const card = document.createElement("article");
+                card.className = "file";
+                const raw = "/api/download/" + encodeURIComponent(tokenId) + "/files/" + encodeURIComponent(file.id) + "/raw";
+                const download = "/api/download/" + encodeURIComponent(tokenId) + "/files/" + encodeURIComponent(file.id) + "/download";
+                card.innerHTML = `
+                    <div class="file-name"></div>
+                    <div class="file-meta">${{bytes(file.size || 0)}} / ${{dateLabel(file.uploadedAt)}}</div>
+                    <div class="actions">
+                        <button type="button" data-action="preview">preview</button>
+                        <button type="button" data-action="copy">copy</button>
+                        <a class="button primary" href="${{download}}" download>get</a>
+                    </div>
+                `;
+                card.querySelector(".file-name").textContent = file.name || file.id;
+                card.querySelector('[data-action="preview"]').addEventListener("click", async () => {{
+                    modal.classList.add("open");
+                    modal.setAttribute("aria-hidden", "false");
+                    modalTitle.textContent = file.name || file.id;
+                    preview.textContent = "loading...";
+                    const res = await fetch(raw, {{ headers: apiHeaders() }});
+                    preview.textContent = res.ok ? await res.text() : statusMessage(res.status);
+                }});
+                card.querySelector('[data-action="copy"]').addEventListener("click", async (event) => {{
+                    const button = event.currentTarget;
+                    const res = await fetch(raw, {{ headers: apiHeaders() }});
+                    if (!res.ok) return;
+                    await navigator.clipboard.writeText(await res.text());
+                    button.textContent = "copied";
+                    setTimeout(() => button.textContent = "copy", 1200);
+                }});
+                filesEl.appendChild(card);
+            }}
+            showDashboard();
+        }}
+
+        form.addEventListener("submit", async (event) => {{
+            event.preventDefault();
+            if (!password.value) return;
+            unlock.disabled = true;
+            error.textContent = "";
+            try {{
+                await verify(password.value);
+                password.value = "";
+            }} catch (err) {{
+                error.textContent = err.message || "something went wrong.";
+            }} finally {{
+                unlock.disabled = false;
+            }}
+        }});
+
+        document.getElementById("lock").addEventListener("click", () => {{
+            sessionStorage.removeItem("sets_session_" + tokenId);
+            sessionToken = "";
+            showLogin("");
+        }});
+        document.getElementById("modal-close").addEventListener("click", () => {{
+            modal.classList.remove("open");
+            modal.setAttribute("aria-hidden", "true");
+            preview.textContent = "";
+        }});
+        modal.addEventListener("click", (event) => {{
+            if (event.target === modal) document.getElementById("modal-close").click();
+        }});
+        window.addEventListener("keydown", (event) => {{
+            if (event.key === "Escape") document.getElementById("modal-close").click();
+        }});
+
+        if (sessionToken) loadFiles().catch(() => showLogin(""));
+    </script>
+</body>
+</html>"""
+    return web.Response(
+        text=body,
+        content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 async def download_app(request: web.Request) -> web.StreamResponse:
     frontend_index: Path | None = request.app.get("frontend_index")
     if frontend_index and frontend_index.is_file():
         return web.FileResponse(frontend_index)
 
-    return html_response(
-        page(
-            "private set vault",
-            """
-            <p>The frontend build was not found on this server.</p>
-            <p>Build the app in <code>private-set-vault-main</code>, then restart the bot.</p>
-            """,
-        ),
-        503,
-    )
+    return builtin_download_app(request.match_info["token_id"])
 
 
 async def frontend_asset_or_app(request: web.Request) -> web.StreamResponse:
@@ -1115,8 +1627,8 @@ async def create_web_app(config: Config, storage: Storage) -> web.Application:
         app["frontend_index"] = frontend_root / "index.html"
         logger.info("Serving frontend from %s.", frontend_root)
     else:
-        logger.warning(
-            "Frontend build not found. Expected index.html under %s.",
+        logger.info(
+            "Frontend build not found under %s; using built-in vault page.",
             config.frontend_dist_dir,
         )
 

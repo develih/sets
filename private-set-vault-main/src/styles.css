@@ -61,7 +61,7 @@
   --color-sidebar-ring: var(--sidebar-ring);
 }
 
-/* Sets Downloader — pure black, modern modules */
+/* private set vault - pure black, modern modules */
 :root {
   --radius: 0.875rem;
 
