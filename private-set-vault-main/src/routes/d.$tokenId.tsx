@@ -43,6 +43,10 @@ type Phase = "locked" | "loading" | "ready";
 
 function Page() {
   const { tokenId } = Route.useParams();
+  return <VaultPage tokenId={tokenId} />;
+}
+
+export function VaultPage({ tokenId }: { tokenId: string }) {
   const [phase, setPhase] = useState<Phase>("locked");
   const [session, setSession] = useState<string>(() =>
     typeof window === "undefined" ? "" : sessionStorage.getItem(`sets_session_${tokenId}`) || "",
