@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import html
 import io
+import logging
 import os
 import re
 import secrets
@@ -44,10 +45,48 @@ UPLOAD_CATEGORY_CHOICES = [
 ]
 
 PBKDF2_ITERATIONS = 220_000
+UPLOAD_READ_TIMEOUT_SECONDS = 30
+
+logger = logging.getLogger("sets_downloader")
 
 
 class UserFacingError(Exception):
     """An expected error that can be shown directly to a Discord user."""
+
+
+async def send_ephemeral(interaction: discord.Interaction, message: str, **kwargs: Any) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True, **kwargs)
+    else:
+        await interaction.response.send_message(message, ephemeral=True, **kwargs)
+
+
+async def report_interaction_error(
+    interaction: discord.Interaction,
+    message: str = "Something went wrong. Check the bot console for details.",
+) -> None:
+    try:
+        await send_ephemeral(interaction, message)
+    except discord.HTTPException:
+        logger.exception("Failed to send Discord error response.")
+
+
+class SafeCommandTree(app_commands.CommandTree):
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        original = getattr(error, "original", error)
+        if isinstance(original, UserFacingError):
+            await report_interaction_error(interaction, str(original))
+            return
+
+        logger.error(
+            "Unhandled slash command error.",
+            exc_info=(type(original), original, original.__traceback__),
+        )
+        await report_interaction_error(interaction)
 
 
 @dataclass(frozen=True)
@@ -357,16 +396,40 @@ def user_can_manage_downloads(interaction: discord.Interaction, config: Config) 
 async def require_manager(interaction: discord.Interaction) -> bool:
     client = interaction.client
     if not isinstance(client, DownloaderBot):
+        await send_ephemeral(interaction, "Bot is not ready.")
         return False
 
     if user_can_manage_downloads(interaction, client.config):
         return True
 
-    await interaction.response.send_message(
-        "You need `Manage Server` permission to use this command.",
-        ephemeral=True,
-    )
+    message = "You need `Manage Server` permission to use this command."
+    if client.config.upload_role_id:
+        message = "You need `Manage Server` permission or the configured uploader role."
+
+    await send_ephemeral(interaction, message)
     return False
+
+
+async def read_attachment_data(file: discord.Attachment) -> bytes:
+    try:
+        return await asyncio.wait_for(
+            file.read(use_cached=False),
+            timeout=UPLOAD_READ_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise UserFacingError(
+            "Discord took too long to send me the file. Please try the upload again."
+        ) from exc
+    except discord.HTTPException as exc:
+        logger.warning(
+            "Discord could not provide attachment %s (%s).",
+            file.filename,
+            file.url,
+            exc_info=True,
+        )
+        raise UserFacingError(
+            "I could not download that attachment from Discord. Please attach the file again."
+        ) from exc
 
 
 class CategorySelect(discord.ui.Select):
@@ -437,6 +500,19 @@ class CategorySelectView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(CategorySelect())
 
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: discord.ui.Item[Any],
+    ) -> None:
+        logger.error(
+            "Unhandled component error for %s.",
+            item,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await report_interaction_error(interaction)
+
 
 send_group = app_commands.Group(name="send", description="Send downloader panels.")
 upload_group = app_commands.Group(name="upload", description="Upload downloader files.")
@@ -493,21 +569,24 @@ async def upload_file(
             max_mb = client.config.max_upload_bytes / 1024 / 1024
             raise UserFacingError(f"That file is too large. Max size is {max_mb:.1f} MB.")
 
-        data = await file.read(use_cached=True)
+        data = await read_attachment_data(file)
+        if not data:
+            raise UserFacingError("That file is empty.")
+
         saved_path = client.storage.save_upload(category.value, file.filename, data)
         count = len(client.storage.list_category_files(category.value))
 
-        await interaction.followup.send(
+        await send_ephemeral(
+            interaction,
             "\n".join(
                 [
                     f"Uploaded `{saved_path.name}` to `{category.name}`.",
                     f"Files in category: `{count}/{client.config.max_files_per_category}`.",
                 ]
-            ),
-            ephemeral=True,
+            )
         )
     except UserFacingError as exc:
-        await interaction.followup.send(str(exc), ephemeral=True)
+        await send_ephemeral(interaction, str(exc))
 
 
 async def health(_: web.Request) -> web.Response:
@@ -694,7 +773,7 @@ async def create_web_app(config: Config, storage: Storage) -> web.Application:
 class DownloaderBot(commands.Bot):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.default()
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix="!", intents=intents, tree_cls=SafeCommandTree)
 
         self.config = config
         self.storage = Storage(config)
@@ -734,6 +813,12 @@ class DownloaderBot(commands.Bot):
 
 async def main() -> None:
     config = Config.from_env()
+
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     if not config.discord_token:
         raise SystemExit("Missing DISCORD_TOKEN. Create a .env file first.")
 
